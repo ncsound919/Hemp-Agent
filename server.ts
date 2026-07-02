@@ -1298,10 +1298,10 @@ app.post("/api/vector/search", (req, res) => {
 
 // 10-Agent Deterministic Query execution (Online Loop)
 app.post("/api/agents/query", async (req, res) => {
-  const { query } = req.body;
+  const { query, mode } = req.body;
   if (!query) return res.status(400).json({ error: "Query is required" });
 
-  console.log(`Executing 10-agent deterministic brain kernel for query: "${query}"`);
+  console.log(`Executing 10-agent deterministic brain kernel for query: "${query}" (mode: ${mode || "default"})`);
   
   const aiClient = getGemini();
   try {
@@ -1310,7 +1310,8 @@ app.post("/api/agents/query", async (req, res) => {
       omics: omicsTable,
       imaging: imagingTable,
       memories: memories,
-      aiClient
+      aiClient,
+      mode
     });
 
     // Auto-save this query execution as an Episodic Memory (to be replayed by Offline Dreaming loop)

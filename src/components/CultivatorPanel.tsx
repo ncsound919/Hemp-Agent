@@ -1,12 +1,22 @@
 import React, { useState } from "react";
-import { Leaf, TestTube, AlertTriangle, ShieldCheck, Loader2 } from "lucide-react";
+import { Leaf, TestTube, AlertTriangle, ShieldCheck, Loader2, Save } from "lucide-react";
+import type { DeterministicExecutionTrace, ChemotypeProfile } from "../types";
 
-export function CultivatorPanel() {
+type OrchestratorMode = "clinical" | "mechanistic" | "hypothesis" | "cultivator" | "notebook";
+
+interface CultivatorPanelProps {
+  onQueryOrchestrator: (query: string, mode?: OrchestratorMode) => Promise<DeterministicExecutionTrace>;
+  onGenerateDesign: (targetSystem: string, cannabinoid: string) => void;
+  onSaveChemotype: (profile: ChemotypeProfile) => Promise<void>;
+}
+
+export function CultivatorPanel({ onQueryOrchestrator, onGenerateDesign, onSaveChemotype }: CultivatorPanelProps) {
   const [thc, setThc] = useState<number>(20);
   const [cbd, setCbd] = useState<number>(5);
   const [terpenes, setTerpenes] = useState("Myrcene, Pinene");
   const [minor, setMinor] = useState("CBG, CBN");
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<any>(null);
 
   const simulate = async () => {
@@ -24,6 +34,23 @@ export function CultivatorPanel() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSave = async () => {
+      setSaving(true);
+      try {
+          await onSaveChemotype({
+              thc,
+              cbd,
+              simulation: {
+                  confidence: result?.confidence || 70,
+                  riskScore: result?.risk_score,
+                  notes: result?.clinical_summary
+              }
+          });
+      } finally {
+          setSaving(false);
+      }
   };
 
   return (
@@ -91,6 +118,11 @@ export function CultivatorPanel() {
                 </div>
                 <p className="text-xs text-slate-300">{result.clinical_summary}</p>
               </div>
+
+              <button onClick={handleSave} disabled={saving} className="w-full bg-slate-800 hover:bg-slate-700 text-white py-2 rounded text-xs font-bold tracking-wider flex items-center justify-center gap-2">
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin"/> : <Save className="w-4 h-4"/>}
+                  SAVE CHEMOTYPE TO GRAPH
+              </button>
 
               {result.protective_factors && result.protective_factors.length > 0 && (
                 <div className="mt-2">

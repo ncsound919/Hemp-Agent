@@ -234,20 +234,89 @@ export default function App() {
     return () => clearInterval(interval);
   }, [systemUptime]);
 
+  // --- Handlers ---
+  const handleSaveChemotype = async (profile: ChemotypeProfile) => {
+    const nodeId = `CHEM-${Date.now()}`;
+    const confidenceNorm =
+      profile.simulation?.confidence != null
+        ? Math.max(0, Math.min(1, profile.simulation.confidence / 100))
+        : 0.7;
+    const label =
+      profile.name ??
+      `Chemotype: THC ${profile.thc}% CBD ${profile.cbd}%${
+        profile.cbg != null ? ` CBG ${profile.cbg}%` : ""
+      }`;
+    const payload = {
+      id: nodeId,
+      label,
+      type: "Chemotype",
+      thcPercent: profile.thc,
+      cbdPercent: profile.cbd,
+      cbgPercent: profile.cbg,
+      chemotypeClass: profile.type,
+      provenance: {
+        source: "cultivator",
+        sourceType: "Simulation",
+        assertingAgent: "CultivatorPanel",
+        confidence: confidenceNorm,
+        verificationStatus: "verified",
+        timestamp: new Date().toISOString(),
+        episodeId: "CULTIVATOR",
+        notes: profile.simulation?.notes,
+        riskScore: profile.simulation?.riskScore,
+      },
+    };
+    await fetch("/api/graph/node", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (profile.simulation?.riskScore && profile.simulation.riskScore > 50) {
+      await fetch("/api/graph/edge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: nodeId,
+          target: "Psychosis",
+          relation: "associated_with",
+          provenance: {
+            source: "cultivator",
+            assertingAgent: "CultivatorPanel",
+            confidence: confidenceNorm,
+            verificationStatus: "unverified",
+            timestamp: new Date().toISOString(),
+            episodeId: "CULTIVATOR",
+          },
+        }),
+      });
+    }
+  };
+
   const handleQueryOrchestrator = async (
     query: string,
     mode: "clinical" | "mechanistic" | "hypothesis" | "cultivator" | "notebook" = "mechanistic"
   ): Promise<DeterministicExecutionTrace> => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      throw new Error("Query text is required for orchestrator.");
+    }
     setIsQuerying(true);
-    setOrchestratorQuery(query);
+    setOrchestratorQuery(trimmed);
     setActiveTab("orchestrator");
     try {
       const res = await fetch("/api/agents/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, mode }),
+        body: JSON.stringify({ query: trimmed, mode }),
       });
-      if (!res.ok) throw new Error("Query failed");
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Deterministic kernel query failed (${res.status}): ${
+            text || "Unknown error"
+          }`
+        );
+      }
       const trace: DeterministicExecutionTrace = await res.json();
       setOrchestrationResult(trace);
       return trace;
@@ -256,11 +325,7 @@ export default function App() {
     }
   };
 
-  const handleGenerateDesign = (targetSystem: string, cannabinoid: string) => {
-    setActiveTab("lab");
-  };
 
-  // Handle Orchestration Query
   const handleOrchestratorSubmit = async (queryText: string) => {
     const trace = await handleQueryOrchestrator(queryText, "clinical");
     addTelemetryLog(`10-Agent Pipeline: Completed synthesis. Confidence: ${trace.confidence}%. Evaluated score: ${trace.metaEvaluationScore}/10.`);
@@ -2573,7 +2638,7 @@ export default function App() {
 
             
             {activeTab === 'omics' && <OmicsPanel omicsData={omics} studiesData={studies} onQueryOrchestrator={handleQueryOrchestrator} onGenerateDesign={handleGenerateDesign} />}
-            {activeTab === 'cultivator' && <CultivatorPanel />}
+            {activeTab === 'cultivator' && <CultivatorPanel onQueryOrchestrator={handleQueryOrchestrator} onGenerateDesign={handleGenerateDesign} onSaveChemotype={handleSaveChemotype} />}
             {activeTab === 'study_design' && <StudyDesignAssistant studiesData={studiesData} onSaveEpisode={() => {}} />}
 
             {/* TAB 9: SCIENTIFIC RESEARCH LAB AGENT */}
