@@ -35,7 +35,8 @@ import {
   ShieldAlert,
   GitMerge,
   ArrowUpRight,
-  Edit
+  Edit,
+  Microscope
 } from "lucide-react";
 import { 
   Study, 
@@ -88,6 +89,9 @@ export default function App() {
   const [isQuerying, setIsQuerying] = useState(false);
   const [orchestrationResult, setOrchestrationResult] = useState<DeterministicExecutionTrace | null>(null);
   
+  const [isLoading, setIsLoading] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  
   // Custom Study Form State
   const [studyTitle, setStudyTitle] = useState("");
   const [studyYear, setStudyYear] = useState(2026);
@@ -108,6 +112,10 @@ export default function App() {
   const [riskProductProfile, setRiskProductProfile] = useState("90% Delta-9-THC Distillate Vape");
   const [isCalculatingRisk, setIsCalculatingRisk] = useState(false);
   const [calculatedRisk, setCalculatedRisk] = useState<RiskProfile | null>(null);
+  
+  // Missing states from audit
+  const [designTarget, setDesignTarget] = useState("");
+  const [designCannabinoid, setDesignCannabinoid] = useState("");
 
   // Procedural Memory / Playbooks States
   const [editingProceduralId, setEditingProceduralId] = useState<string | null>(null);
@@ -157,6 +165,8 @@ export default function App() {
 
   // Fetch all initial data
   const fetchData = async () => {
+    setIsLoading(true);
+    setFetchError(null);
     try {
       const resStudies = await fetch("/api/db/studies");
       const dataStudies = await resStudies.json();
@@ -206,6 +216,9 @@ export default function App() {
       setExternalServers(dataClients);
     } catch (err) {
       console.error("Failed to load databases:", err);
+      setFetchError("Failed to load initial data.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -216,23 +229,17 @@ export default function App() {
     const interval = setInterval(() => {
       setLatency(Math.floor(10 + Math.random() * 8));
       // Tick uptime
-      const parts = systemUptime.split(":");
-      let sec = parseInt(parts[2]) + 1;
-      let min = parseInt(parts[1]);
-      let hr = parseInt(parts[0]);
-      if (sec >= 60) {
-        sec = 0;
-        min += 1;
-      }
-      if (min >= 60) {
-        min = 0;
-        hr += 1;
-      }
-      setSystemUptime(`${hr.toString().padStart(3, '0')}:${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`);
+      setSystemUptime(prev => {
+        let [h, m, s] = prev.split(':').map(Number);
+        s++;
+        if (s >= 60) { s = 0; m++; }
+        if (m >= 60) { m = 0; h++; }
+        return `${String(h).padStart(3, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      });
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [systemUptime]);
+  }, []);
 
   // --- Handlers ---
   const handleSaveChemotype = async (profile: ChemotypeProfile) => {
@@ -266,29 +273,44 @@ export default function App() {
         riskScore: profile.simulation?.riskScore,
       },
     };
-    await fetch("/api/graph/node", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (profile.simulation?.riskScore && profile.simulation.riskScore > 50) {
-      await fetch("/api/graph/edge", {
+    
+    try {
+      const res = await fetch("/api/graph/node", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: nodeId,
-          target: "Psychosis",
-          relation: "associated_with",
-          provenance: {
-            source: "cultivator",
-            assertingAgent: "CultivatorPanel",
-            confidence: confidenceNorm,
-            verificationStatus: "unverified",
-            timestamp: new Date().toISOString(),
-            episodeId: "CULTIVATOR",
-          },
-        }),
+        body: JSON.stringify(payload),
       });
+      if (!res.ok) throw new Error("Node creation failed");
+      addTelemetryLog(`NEO4J: Injected chemotype ontology node: \"${nodeId}\"`);
+    } catch (err: any) {
+      addTelemetryLog(`ERR: Failed to save chemotype node: ${err.message}`);
+      return;
+    }
+
+    if (profile.simulation?.riskScore && profile.simulation.riskScore > 50) {
+      try {
+        const res = await fetch("/api/graph/edge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: nodeId,
+            target: "Psychosis",
+            relation: "associated_with",
+            provenance: {
+              source: "cultivator",
+              assertingAgent: "CultivatorPanel",
+              confidence: confidenceNorm,
+              verificationStatus: "unverified",
+              timestamp: new Date().toISOString(),
+              episodeId: "CULTIVATOR",
+            },
+          }),
+        });
+        if (!res.ok) throw new Error("Edge creation failed");
+        addTelemetryLog(`NEO4J: Synapsed connection: ${nodeId} -[associated_with]-> Psychosis`);
+      } catch (err: any) {
+        addTelemetryLog(`ERR: Failed to save chemotype edge: ${err.message}`);
+      }
     }
   };
 
@@ -327,9 +349,14 @@ export default function App() {
 
 
   const handleOrchestratorSubmit = async (queryText: string) => {
-    const trace = await handleQueryOrchestrator(queryText, "clinical");
-    addTelemetryLog(`10-Agent Pipeline: Completed synthesis. Confidence: ${trace.confidence}%. Evaluated score: ${trace.metaEvaluationScore}/10.`);
-    fetchData();
+    try {
+      const trace = await handleQueryOrchestrator(queryText, "clinical");
+      addTelemetryLog(`10-Agent Pipeline: Completed synthesis. Confidence: ${trace.confidence}%. Evaluated score: ${trace.metaEvaluationScore}/10.`);
+      fetchData();
+    } catch (err: any) {
+      addTelemetryLog(`ERR: Orchestrator submission failed: ${err.message}`);
+      console.error("Orchestrator submission error:", err);
+    }
   };
 
   // Submit Feedback on Memory to update confidence weights
@@ -627,6 +654,12 @@ export default function App() {
     }
   };
 
+  const handleGenerateDesign = (target: string, cannabinoid: string) => {
+    setDesignTarget(target);
+    setDesignCannabinoid(cannabinoid);
+    setActiveTab("study_design");
+  };
+
   const handleKairosTrigger = async () => {
     try {
       const res = await fetch("/api/graph/kairos-trigger", {
@@ -641,6 +674,9 @@ export default function App() {
       console.error(err);
     }
   };
+
+  const exportArtifact = (type: string, format: string) => console.log(`Exporting ${type} as ${format}`);
+  const exportFlyer = (id: string) => console.log(`Exporting flyer for ${id}`);
 
   const handleTriggerDreaming = async () => {
     setIsDreaming(true);
@@ -843,7 +879,7 @@ export default function App() {
   };
 
   // Auto trigger a core inference
-  const handleManualInference = () => {
+  const handleManualInference = async () => {
     const queries = [
       "Detail the endocannabinoid tone alterations under chronic THC exposure in hippocampal subfields.",
       "Summarize omics pathway enrichment indexes associated with Beta-Caryophyllene microglial shielding.",
@@ -852,7 +888,13 @@ export default function App() {
     const randQuery = queries[Math.floor(Math.random() * queries.length)];
     setActiveTab("orchestrator");
     setOrchestratorQuery(randQuery);
-    handleOrchestratorSubmit(randQuery);
+    
+    try {
+      await handleOrchestratorSubmit(randQuery);
+    } catch (err: any) {
+      addTelemetryLog(`ERR: Manual inference failed: ${err.message}`);
+      console.error("Manual inference error:", err);
+    }
   };
 
   // Quick preset trigger
@@ -866,6 +908,18 @@ export default function App() {
 
   return (
     <div className="w-full max-w-[1280px] mx-auto min-h-screen bg-[#050805] text-[#e0e7e0] font-sans selection:bg-[#00ff66]/30 overflow-x-hidden flex flex-col border-x border-[#1a2e1a]">
+      {isLoading && (
+          <div className="fixed inset-0 flex items-center justify-center bg-black/80 z-50 text-white font-mono">
+              <Loader2 className="w-8 h-8 animate-spin mr-3 text-[#00ff66]" />
+              INITIALIZING CORE DATABASES...
+          </div>
+      )}
+      {fetchError && (
+            <div className="fixed top-16 right-6 bg-red-950/90 border border-red-500/50 p-4 rounded text-red-200 z-50 flex items-center gap-2 font-mono">
+              <AlertTriangle className="w-5 h-5"/>
+              {fetchError}
+            </div>
+      )}
       {/* OS Top Navigation Bar */}
       <header className="h-12 border-b border-[#1a2e1a] bg-[#080d08]/85 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-4">
@@ -1332,7 +1386,7 @@ export default function App() {
                           { title: "Track 2: CBD Allostery", query: "How does CBD modulate CB1 allosteric binding?" },
                           { title: "Track 3: DMN Shifts", query: "Explain Default Mode Network shifts post-THC administration." }
                         ].map((track, i) => (
-                          <div key={i} className="border border-slate-800/80 bg-slate-950/40 p-3 rounded-lg hover:border-purple-500/50 hover:bg-purple-950/20 transition cursor-pointer" onClick={() => { setQueryInput(track.query); setActiveTab("orchestrator"); }}>
+                          <div key={i} className="border border-slate-800/80 bg-slate-950/40 p-3 rounded-lg hover:border-purple-500/50 hover:bg-purple-950/20 transition cursor-pointer" onClick={() => { setOrchestratorQuery(track.query); setActiveTab("orchestrator"); }}>
                             <h5 className="text-xs font-bold text-purple-300 mb-1">{track.title}</h5>
                             <p className="text-[10px] text-slate-400 leading-snug font-mono">"{track.query}"</p>
                             <div className="mt-2 text-right">
@@ -2639,7 +2693,7 @@ export default function App() {
             
             {activeTab === 'omics' && <OmicsPanel omicsData={omics} studiesData={studies} onQueryOrchestrator={handleQueryOrchestrator} onGenerateDesign={handleGenerateDesign} />}
             {activeTab === 'cultivator' && <CultivatorPanel onQueryOrchestrator={handleQueryOrchestrator} onGenerateDesign={handleGenerateDesign} onSaveChemotype={handleSaveChemotype} />}
-            {activeTab === 'study_design' && <StudyDesignAssistant studiesData={studiesData} onSaveEpisode={() => {}} />}
+            {activeTab === 'study_design' && <StudyDesignAssistant studiesData={studies} initialTargetSystem={designTarget} initialCannabinoid={designCannabinoid} onSaveEpisode={(episode) => console.log('Saving episode', episode)} />}
 
             {/* TAB 9: SCIENTIFIC RESEARCH LAB AGENT */}
             {activeTab === "lab" && (

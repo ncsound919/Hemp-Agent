@@ -2,13 +2,21 @@ import React, { useState } from "react";
 import { Microscope, Loader2, Save, Link as LinkIcon, AlertCircle } from "lucide-react";
 import type { SimulationResult } from "../../types";
 
-export function StudyDesignAssistant({ studiesData, onSaveEpisode }: { studiesData: any[], onSaveEpisode: (ep: any) => void }) {
-  const [targetSystem, setTargetSystem] = useState("Microglial activation");
-  const [cannabinoid, setCannabinoid] = useState("THC");
+export function StudyDesignAssistant({ studiesData, onSaveEpisode, initialTargetSystem, initialCannabinoid }: { studiesData: any[], onSaveEpisode: (ep: any) => void, initialTargetSystem?: string, initialCannabinoid?: string }) {
+  const [targetSystem, setTargetSystem] = useState(initialTargetSystem || "Microglial activation");
+  const [cannabinoid, setCannabinoid] = useState(initialCannabinoid || "THC");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [design, setDesign] = useState<any>(null);
   const [simulation, setSimulation] = useState<SimulationResult | null>(null);
+
+  React.useEffect(() => {
+    if (initialTargetSystem) setTargetSystem(initialTargetSystem);
+  }, [initialTargetSystem]);
+
+  React.useEffect(() => {
+    if (initialCannabinoid) setCannabinoid(initialCannabinoid);
+  }, [initialCannabinoid]);
 
   const generateDesign = async () => {
     setLoading(true);

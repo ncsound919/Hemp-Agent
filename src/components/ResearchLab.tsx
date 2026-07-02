@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { TerminalLog } from "./ResearchLab/TerminalLog";
 import { 
   Beaker, 
   FlaskConical, 
@@ -79,25 +80,35 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
     "[05:19:45] [PUBLISH] Markdown document ART-001 compiled and synced to ./lab_output/papers/"
   ]);
 
-  const terminalEndRef = useRef<HTMLDivElement>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Fetch Lab Data
   const fetchLabData = async () => {
+    setIsLoading(true);
+    setError(null);
     try {
-      const hRes = await fetch("/api/lab/hypotheses");
+      const [hRes, eRes, cRes, aRes, sRes] = await Promise.all([
+        fetch("/api/lab/hypotheses"),
+        fetch("/api/lab/experiments"),
+        fetch("/api/lab/conclusions"),
+        fetch("/api/lab/artifacts"),
+        fetch("/api/lab/settings"),
+      ]);
+
+      if (!hRes.ok || !eRes.ok || !cRes.ok || !aRes.ok || !sRes.ok) {
+        throw new Error("Failed to fetch some lab datasets");
+      }
+
       const hypothesesData = await hRes.json();
-      setHypotheses(hypothesesData);
-
-      const eRes = await fetch("/api/lab/experiments");
       const experimentsData = await eRes.json();
-      setExperiments(experimentsData);
-
-      const cRes = await fetch("/api/lab/conclusions");
       const conclusionsData = await cRes.json();
-      setConclusions(conclusionsData);
-
-      const aRes = await fetch("/api/lab/artifacts");
       const artifactsData = await aRes.json();
+      const settingsData = await sRes.json();
+
+      setHypotheses(hypothesesData);
+      setExperiments(experimentsData);
+      setConclusions(conclusionsData);
       setArtifacts(artifactsData);
 
       // Auto set the first artifact as default if none selected
@@ -105,31 +116,29 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
         setSelectedArtifact(artifactsData[0]);
       }
 
-      const sRes = await fetch("/api/lab/settings");
-      const settingsData = await sRes.json();
       setIsRunning(settingsData.isRunning);
       setIntervalMs(settingsData.intervalMs);
-
     } catch (err) {
       console.error("Failed to fetch lab datasets:", err);
+      setError("Failed to fetch lab datasets. Please check the backend.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    // eslint-disable-next-line
+    if (!isRunning) return;
+    
     fetchLabData();
-    // Poll for changes every 8 seconds to show autonomous updates!
+
+    // Poll for changes every intervalMs to show autonomous updates!
     const pollTimer = setInterval(() => {
       fetchLabData();
-    }, 8000);
+    }, intervalMs);
 
     return () => clearInterval(pollTimer);
-  }, []);
+  }, [isRunning, intervalMs]);
 
-  // Sync scroll on new terminal logs
-  useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [terminalLogs]);
 
   // Handle manual trigger
   const handleTriggerIteration = async () => {
@@ -144,7 +153,7 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
       `[${tempTime}] [INGEST] Scan complete. Pulled latest BigQuery and vector databases.`,
       `[${tempTime}] [STRUCTURE] Translating unstructured vectors into clinical graph ontologies...`,
       `[${tempTime}] [HYPOTHESIZE] Scanning ontological contradictions and formulating target hypotheses...`
-    ]);
+    ].slice(-200));
 
     try {
       const res = await fetch("/api/lab/trigger", { method: "POST" });
@@ -163,7 +172,7 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
           `[${finishTime}] [ANALYZE] evidence score compiled. Assigned confidence ${hyp?.confidence}%.`,
           `[${finishTime}] [PUBLISH] Academic manuscript compiled and committed to local drive: ${artifact?.fileUrl}`,
           `[${finishTime}] [PERSIST] Updated knowledge graph and committed episodic trace to memory database.`
-        ]);
+        ].slice(-200));
 
         await fetchLabData();
         triggerRefreshDatabases();
@@ -205,7 +214,7 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
         setTerminalLogs(prev => [
           ...prev,
           `[${new Date().toLocaleTimeString()}] [MANUAL_SEED] Custom hypothesis committed. Queueing in Scheduler/Kairos engine.`
-        ]);
+        ].slice(-200));
         await fetchLabData();
         setLabTab("hypotheses");
       }
@@ -269,18 +278,26 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
     setTerminalLogs(prev => [
       ...prev,
       `[${new Date().toLocaleTimeString()}] [SYSTEM_EXPORT] Synced active workspace artifacts and db traces to local filesystem (HempOS_Local_Export.json)`
-    ]);
+    ].slice(-200));
   };
 
-  // Get active step index based on simulated logs
-  const getSimulatedActiveStep = () => {
-    if (isTriggering) return 4; // Experimenting
-    if (!isRunning) return -1; // Idle/Paused
-    const seconds = new Date().getSeconds();
-    return Math.floor((seconds % 40) / 5); // Cycle through 8 steps every 40s
-  };
+  // Active step state
+  const [activeStepIdx, setActiveStepIdx] = useState(0);
 
-  const activeStepIdx = getSimulatedActiveStep();
+  useEffect(() => {
+    if (isTriggering) {
+      setActiveStepIdx(4);
+      return;
+    }
+    if (!isRunning) {
+      setActiveStepIdx(-1);
+      return;
+    }
+    const stepInterval = setInterval(() => {
+      setActiveStepIdx((prev) => (prev + 1) % 8);
+    }, 5000);
+    return () => clearInterval(stepInterval);
+  }, [isRunning, isTriggering]);
 
   const scientificSteps = [
     { name: "INGEST", desc: "Scan research feeds, PDFs, OCR, & drive metadata" },
@@ -299,10 +316,6 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
     return art.type === artifactFilter;
   });
 
-  // Filter terminal logs
-  const filteredTerminalLogs = terminalLogs.filter(log => 
-    log.toLowerCase().includes(terminalSearch.toLowerCase())
-  );
 
   return (
     <div className="relative z-10 flex flex-col h-full flex-1 overflow-hidden pr-1">
@@ -528,35 +541,7 @@ export default function ResearchLab({ addTelemetryLog, triggerRefreshDatabases }
               </div>
 
               {/* Right Panel: Continuous Swarm Terminal Feed */}
-              <div className="lg:col-span-8 bg-black border border-slate-900 rounded-xl p-4 flex flex-col gap-2 h-96">
-                <div className="flex justify-between items-center border-b border-slate-900 pb-2">
-                  <div className="flex items-center gap-2">
-                    <Terminal className="w-4 h-4 text-emerald-400 animate-pulse" />
-                    <span className="text-xs font-mono font-bold text-slate-200">10-Agent Swarm Real-Time Telemetry Stream</span>
-                  </div>
-                  <input
-                    type="text"
-                    placeholder="Filter terminal logs..."
-                    value={terminalSearch}
-                    onChange={(e) => setTerminalSearch(e.target.value)}
-                    className="bg-slate-900/60 border border-slate-800 text-[10px] px-2 py-0.5 rounded font-mono text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 w-44"
-                  />
-                </div>
-
-                <div className="flex-1 bg-[#020502] rounded border border-[#112011] p-3 font-mono text-[10px] text-emerald-400 overflow-y-auto leading-relaxed select-all">
-                  {filteredTerminalLogs.length === 0 ? (
-                    <div className="text-slate-500 italic text-center py-10">No matching telemetry logs found.</div>
-                  ) : (
-                    filteredTerminalLogs.map((log, index) => (
-                      <div key={index} className="hover:bg-emerald-950/20 px-1 py-0.5 rounded">
-                        <span className="text-slate-500 select-none mr-2">{(index+1).toString().padStart(3, '0')}</span>
-                        <span>{log}</span>
-                      </div>
-                    ))
-                  )}
-                  <div ref={terminalEndRef} />
-                </div>
-              </div>
+              <TerminalLog logs={terminalLogs} search={terminalSearch} onSearchChange={setTerminalSearch} />
 
             </div>
           </div>

@@ -13,6 +13,11 @@ const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "gemini-embedding-exp-03-
 const USE_GEMINI_EMBEDDINGS = process.env.USE_GEMINI_EMBEDDINGS === "true";
 const LLM_TIMEOUT_MS = 8000;
 const EMBEDDING_DIMS = 128;
+const NCBI_API_KEY = process.env.NCBI_API_KEY;
+
+function stripMarkdown(text: string): string {
+  return text.replace(/```json\n?|\n?```/g, "").trim();
+}
 
 // ==========================================
 // DETERMINISTIC EMBEDDING FALLBACK
@@ -165,7 +170,19 @@ interface AgentContext {
   readonly imaging: ImagingMetric[];
   readonly memories: MemoryItem[];
   readonly vectorStore: VectorStore;
-  outputs: Record<string, unknown>; // every agent writes ONLY to its own namespaced key
+  outputs: AgentOutputs;
+}
+
+interface AgentOutputs {
+  [key: string]: unknown;
+  goal_planner_agent?: { taskDecomposition: string[]; plannedWorkflow: string[] };
+  semantic_search_agent?: { matchingChunks: VectorChunk[]; matchingStudies: Study[]; embeddingSource: "gemini" | "deterministic-fallback"; scores: { id: string; score: number }[]; ncbiArticles: string[] };
+  structuring_agent?: { entities: string[] };
+  verification_agent?: { contradictions: string[]; llmChecked: boolean };
+  simulation_agent?: { simulation: { compound: string; occupancy: number; kineticRatio: number } };
+  safety_agent?: { safetyLog: string; critical: boolean; riskFlags: string[] };
+  meta_evaluator_agent?: { metaScore: number; evidenceCount: number };
+  interface_agent?: { finalSummary: string; suggestedAction: string; generatedBy: "llm" | "deterministic" };
 }
 
 interface Agent {
@@ -238,15 +255,20 @@ class SemanticSearchAgent extends BaseAgent {
     );
 
     let ncbiArticles: string[] = [];
-    const ncbiKey = process.env.NCBI_API_KEY || "b8ac2ca44c29245f22b45b25b73a8bf77408";
-    if (ncbiKey) {
+    if (NCBI_API_KEY) {
       try {
         const encodedQuery = encodeURIComponent(ctx.query);
-        const searchRes = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodedQuery}&retmode=json&retmax=2&api_key=${ncbiKey}`);
+        const searchRes = await withTimeout(
+          fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodedQuery}&retmode=json&retmax=2&api_key=${NCBI_API_KEY}`),
+          LLM_TIMEOUT_MS, "ncbi-esearch"
+        );
         const searchData: any = await searchRes.json();
         const idList = searchData.esearchresult?.idlist || [];
         if (idList.length > 0) {
-          const summaryRes = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${idList.join(",")}&retmode=json&api_key=${ncbiKey}`);
+          const summaryRes = await withTimeout(
+            fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${idList.join(",")}&retmode=json&api_key=${NCBI_API_KEY}`),
+            LLM_TIMEOUT_MS, "ncbi-esummary"
+          );
           const summaryData: any = await summaryRes.json();
           ncbiArticles = idList.map((id: string) => `PMID-${id}: ${summaryData.result?.[id]?.title || "Unknown Title"}`);
         }
@@ -327,7 +349,7 @@ class VerificationAgent extends BaseAgent {
           ctx.aiClient.models.generateContent({ model: GEMINI_MODEL, contents: prompt, config: { responseMimeType: "application/json" } }),
           LLM_TIMEOUT_MS, "verification-llm"
         );
-        const parsed = JSON.parse(response.text || "[]");
+        const parsed = JSON.parse(stripMarkdown(response.text || "[]"));
         if (isStringArray(parsed)) {
           contradictions.push(...parsed);
           llmChecked = true;
@@ -429,19 +451,22 @@ class InterfaceAgent extends BaseAgent {
     const q = ctx.queryLower;
 
     if (q.includes("adolescent") || q.includes("pruning") || q.includes("vaping")) {
+      const excerpts = (search?.matchingChunks ?? []).map(c => c.content.slice(0, 100) + "...").join(" | ");
       return {
-        summary: `### Neurobiological Synthesis: Adolescent Cannabinoid Exposure & PFC Maturation\n\n1. **Receptor Dynamics:** THC binds CB1 (simulated occupancy: ${simulation.occupancy}%).\n2. **Cascade:** CB1 downregulation disrupts retrograde signaling, activating microglial hyper-pruning.\n3. **Circuit-Level:** DMN coherence shifts, PFC-amygdala decoupling.\n\n*Evidence: ${evidenceIds}*`,
+        summary: `### Neurobiological Synthesis: Adolescent Cannabinoid Exposure & PFC Maturation\n\n1. **Receptor Dynamics:** THC binds CB1 (simulated occupancy: ${simulation.occupancy}%).\n2. **Cascade:** CB1 downregulation disrupts retrograde signaling, activating microglial hyper-pruning.\n3. **Circuit-Level:** DMN coherence shifts, PFC-amygdala decoupling.\n\n*Evidence excerpts: ${excerpts}*`,
         suggestedAction: "Initiate DMN coherence sweep and tag adolescent-risk warnings."
       };
     }
     if (q.includes("cbd") || q.includes("allosteric") || q.includes("anxiety")) {
+      const excerpts = (search?.matchingChunks ?? []).map(c => c.content.slice(0, 100) + "...").join(" | ");
       return {
-        summary: `### Neurobiological Synthesis: CBD Allosteric Mitigation\n\n1. CBD binds hydrophobic exosite, reducing THC activation kinetics.\n2. Simulated occupancy reduced to ${simulation.occupancy}%.\n3. Mitigates tachycardia and paranoia via reduced glutamate suppression.\n\n*Evidence: ${evidenceIds}*`,
+        summary: `### Neurobiological Synthesis: CBD Allosteric Mitigation\n\n1. CBD binds hydrophobic exosite, reducing THC activation kinetics.\n2. Simulated occupancy reduced to ${simulation.occupancy}%.\n3. Mitigates tachycardia and paranoia via reduced glutamate suppression.\n\n*Evidence excerpts: ${excerpts}*`,
         suggestedAction: "Add CBD binding constants to ontology; adjust synergy calculations."
       };
     }
+    const excerpts = (search?.matchingChunks ?? []).map(c => c.content.slice(0, 100) + "...").join(" | ");
     return {
-      summary: `### General Cannabinoid Synthesis: "${ctx.query}"\n\n- Compound ${simulation.compound} at occupancy ${simulation.occupancy}%.\n- Kinetic ratio: ${simulation.kineticRatio.toFixed(2)} RFU/sec.\n\n*Evidence: ${evidenceIds}*`,
+      summary: `### General Cannabinoid Synthesis: "${ctx.query}"\n\n- Compound ${simulation.compound} at occupancy ${simulation.occupancy}%.\n- Kinetic ratio: ${simulation.kineticRatio.toFixed(2)} RFU/sec.\n\n*Evidence excerpts: ${excerpts}*`,
       suggestedAction: "Store synaptic pruning indexes in long-term semantic memory."
     };
   }
@@ -476,7 +501,7 @@ Format as JSON: { "summary": "...", "suggestedAction": "..." }`;
           ctx.aiClient.models.generateContent({ model: GEMINI_MODEL, contents: prompt, config: { responseMimeType: "application/json" } }),
           LLM_TIMEOUT_MS, "interface-llm"
         );
-        const parsed = JSON.parse(response.text || "{}");
+        const parsed = JSON.parse(stripMarkdown(response.text || "{}"));
         if (typeof parsed.summary === "string" && parsed.summary.length > 0) {
           finalSummary = parsed.summary;
           suggestedAction = typeof parsed.suggestedAction === "string" ? parsed.suggestedAction : suggestedAction;
@@ -521,6 +546,7 @@ export async function runDeterministicPipeline(
   const steps: AgentStep[] = [];
   for (const agent of agents) {
     try {
+      console.log(`Pipeline: Executing ${agent.name}...`);
       steps.push(await agent.execute(agentCtx));
     } catch (err) {
       steps.push({
@@ -558,27 +584,23 @@ export async function runDeterministicPipeline(
 // ==========================================
 // DREAMING LOOP — with provenance and idempotency
 // ==========================================
-const DISTILLATION_PATTERNS: { test: (c: string) => boolean; fact: (id: string) => string; template: (id: string) => string; node: GraphNode; edge: GraphEdge }[] = [
-  {
-    test: c => c.includes("vape") || c.includes("adolescent"),
-    fact: id => `${id}: Daily high-potency THC inhalation downregulates CB1, triggering microglial-mediated dendritic spine loss in adolescent PFC.`,
-    template: id => `${id}: For adolescent vape queries, fetch rodent developmental studies and override adult risk weights.`,
-    node: { id: "Adolescent_Pruning", label: "Adolescent Pruning", type: "Pathway" },
-    edge: { id: "E-temp-1", source: "CB1", target: "Adolescent_Pruning", relation: "associated_with" }
-  },
-  {
-    test: c => c.includes("caryophyllene") || c.includes("microglia"),
-    fact: id => `${id}: Beta-Caryophyllene activates CB2 on microglia, inhibiting NF-kB for anti-inflammatory neuroprotection.`,
-    template: id => `${id}: For neuroprotective compounds, sequence omics agent first to check cytokine expression.`,
-    node: { id: "NF_KB_Pathway", label: "NF-kB Pathway", type: "Pathway" },
-    edge: { id: "E-temp-2", source: "CB2", target: "NF_KB_Pathway", relation: "upregulates" }
-  }
-];
+import playbooks from "./playbooks.json";
+
+// ... existing code ...
+
+const DISTILLATION_PATTERNS = playbooks.distillationPatterns.map(p => ({
+  test: (c: string) => new RegExp(p.test, "i").test(c),
+  fact: (id: string) => `${id}: ${p.fact}`,
+  template: (id: string) => `${id}: ${p.template}`,
+  node: p.node,
+  edge: p.edge
+}));
+
 const DEFAULT_PATTERN = {
-  fact: (id: string) => `${id}: Exogenous cannabinoid agonists trigger dose-dependent homeostatic synaptic dampening.`,
-  template: (id: string) => `${id}: Always run kinetics simulation before final summary.`,
-  node: { id: "Homeostatic_Dampening", label: "Homeostatic Dampening", type: "Pathway" as const } as GraphNode,
-  edge: { id: "E-temp-3", source: "Cannabinoid_Receptor", target: "Homeostatic_Dampening", relation: "associated_with" as const } as GraphEdge
+  fact: (id: string) => `${id}: ${playbooks.defaultPattern.fact}`,
+  template: (id: string) => `${id}: ${playbooks.defaultPattern.template}`,
+  node: playbooks.defaultPattern.node as GraphNode,
+  edge: { ...playbooks.defaultPattern.edge, id: "E-temp-3" } as GraphEdge
 };
 
 export function runDreamingLoop(ctx: { memories: MemoryItem[]; graphNodes: GraphNode[]; graphEdges: GraphEdge[]; }): DreamResult {
@@ -630,6 +652,7 @@ export function runDreamingLoop(ctx: { memories: MemoryItem[]; graphNodes: Graph
       tags: ["dream-distillation", "consolidated-fact", dreamId]
     });
   });
+  if (ctx.memories.length > 100) ctx.memories.splice(0, ctx.memories.length - 100);
   proceduralTemplates.forEach(template => {
     ctx.memories.push({
       id: `M-${randomUUID().slice(0, 8)}`, type: "Procedural", content: template,
@@ -644,7 +667,8 @@ export function runDreamingLoop(ctx: { memories: MemoryItem[]; graphNodes: Graph
 
 export const vectorChunks = vectorStore.getAllChunks();
 export const dreamResults: any[] = [];
-export function searchVectorDb(query: string): any[] {
-  const vector = deterministicEmbedding(query);
+export async function searchVectorDb(query: string, aiClient?: GoogleGenAI): Promise<any[]> {
+  await ensureEmbeddings(vectorStore, aiClient);
+  const vector = (await generateEmbedding(query, aiClient)).vector;
   return vectorStore.search(vector);
 }
